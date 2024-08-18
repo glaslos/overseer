@@ -77,7 +77,11 @@ func (h *Github) Fetch() (io.Reader, error) {
 	}
 	h.delay = true
 	//check release status
-	resp, err := h.client.Get(h.releaseURL)
+	req, _ := http.NewRequest("GET", h.releaseURL, nil)
+	if h.Token != "" {
+		req.Header.Set("Authorization", "Bearer "+h.Token)
+	}
+	resp, err := h.client.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("release info request failed (%s)", err)
 	}
@@ -103,7 +107,10 @@ func (h *Github) Fetch() (io.Reader, error) {
 		return nil, fmt.Errorf("no matching assets in this release (%s)", h.latestRelease.TagName)
 	}
 	//fetch location
-	req, _ := http.NewRequest("HEAD", assetURL, nil)
+	req, _ = http.NewRequest("HEAD", assetURL, nil)
+	if h.Token != "" {
+		req.Header.Set("Authorization", "Bearer "+h.Token)
+	}
 	resp, err = http.DefaultTransport.RoundTrip(req)
 	if err != nil {
 		return nil, fmt.Errorf("release location request failed (%s)", err)
@@ -119,6 +126,9 @@ func (h *Github) Fetch() (io.Reader, error) {
 		return nil, fmt.Errorf("release location url error (%s)", err)
 	}
 	req.Header.Set("Range", "bytes=0-0") // HEAD not allowed so we request for 1 byte
+	if h.Token != "" {
+		req.Header.Set("Authorization", "Bearer "+h.Token)
+	}
 	resp, err = http.DefaultTransport.RoundTrip(req)
 	if err != nil {
 		return nil, fmt.Errorf("release location request failed (%s)", err)
@@ -132,7 +142,11 @@ func (h *Github) Fetch() (io.Reader, error) {
 		return nil, nil //skip, hash match
 	}
 	//get binary request
-	resp, err = h.client.Get(s3URL)
+	req, _ = http.NewRequest("GET", s3URL, nil)
+	if h.Token != "" {
+		req.Header.Set("Authorization", "Bearer "+h.Token)
+	}
+	resp, err = h.client.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("release binary request failed (%s)", err)
 	}
