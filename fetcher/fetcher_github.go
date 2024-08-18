@@ -17,15 +17,17 @@ import (
 // contains a matching asset, it will fetch
 // and return its io.Reader stream.
 type Github struct {
-	//Github username and repository name
+	// Github username and repository name
 	User, Repo string
-	//Interval between fetches
+	// Token is optional for authenticated requests (private repos)
+	Token string
+	// Interval between fetches
 	Interval time.Duration
-	//Asset is used to find matching release asset.
-	//By default a file will match if it contains
-	//both GOOS and GOARCH.
+	// Asset is used to find matching release asset.
+	// By default a file will match if it contains
+	// both GOOS and GOARCH.
 	Asset func(filename string) bool
-	//internal state
+	// internal state
 	releaseURL    string
 	delay         bool
 	lastETag      string
@@ -36,6 +38,7 @@ type Github struct {
 			URL  string `json:"browser_download_url"`
 		} `json:"assets"`
 	}
+	client *http.Client
 }
 
 func (h *Github) defaultAsset(filename string) bool {
@@ -60,6 +63,9 @@ func (h *Github) Init() error {
 	} else if h.Interval < 1*time.Minute {
 		log.Printf("[overseer.github] warning: intervals less than 1 minute will surpass the public rate limit")
 	}
+	h.client = &http.Client{
+		Timeout: time.Second * 10,
+	}
 	return nil
 }
 
@@ -71,7 +77,7 @@ func (h *Github) Fetch() (io.Reader, error) {
 	}
 	h.delay = true
 	//check release status
-	resp, err := http.Get(h.releaseURL)
+	resp, err := h.client.Get(h.releaseURL)
 	if err != nil {
 		return nil, fmt.Errorf("release info request failed (%s)", err)
 	}
@@ -126,7 +132,7 @@ func (h *Github) Fetch() (io.Reader, error) {
 		return nil, nil //skip, hash match
 	}
 	//get binary request
-	resp, err = http.Get(s3URL)
+	resp, err = h.client.Get(s3URL)
 	if err != nil {
 		return nil, fmt.Errorf("release binary request failed (%s)", err)
 	}
