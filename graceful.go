@@ -1,8 +1,8 @@
 package overseer
 
-//overseer listeners and connections allow graceful
-//restarts by tracking when all connections from a listener
-//have been closed
+// overseer listeners and connections allow graceful
+// restarts by tracking when all connections from a listener
+// have been closed
 
 import (
 	"net"
