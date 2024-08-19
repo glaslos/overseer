@@ -6,7 +6,6 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"strings"
 	"time"
 
 	"github.com/StackExchange/wmi"
@@ -113,17 +112,4 @@ func WMIQueryWithContext(ctx context.Context, query string, dst interface{}, con
 	case err := <-errChan:
 		return err
 	}
-}
-
-// overwrite: see https://github.com/jpillora/overseer/issues/56#issuecomment-656405955
-func overwrite(dst, src string) error {
-	old := strings.TrimSuffix(dst, ".exe") + "-old.exe"
-	if err := move(old, dst); err != nil {
-		return err
-	}
-	if err := move(dst, src); err != nil {
-		return err
-	}
-	os.Remove(old)
-	return nil
 }

@@ -15,6 +15,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strconv"
+	"strings"
 	"syscall"
 	"time"
 )
@@ -27,7 +28,7 @@ type parent struct {
 	childID             int
 	childCmd            *exec.Cmd
 	childExtraFiles     []*os.File
-	binPath, tmpBinPath string
+	binPath             string
 	binPerms            os.FileMode
 	binHash             []byte
 	restarting          bool
@@ -432,4 +433,17 @@ func extension() string {
 	}
 
 	return ""
+}
+
+// overwrite: see https://github.com/jpillora/overseer/issues/56#issuecomment-656405955
+func overwrite(dst, src string) error {
+	old := strings.TrimSuffix(dst, ".exe") + "-old.exe"
+	if err := move(old, dst); err != nil {
+		return err
+	}
+	if err := move(dst, src); err != nil {
+		return err
+	}
+	os.Remove(old)
+	return nil
 }
