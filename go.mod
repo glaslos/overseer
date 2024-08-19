@@ -1,10 +1,13 @@
-module github.com/jpillora/overseer
+module github.com/glaslos/overseer
 
-go 1.18
+go 1.22
 
 require (
-	github.com/StackExchange/wmi v0.0.0-20190523213315-cbe66965904d
+	github.com/StackExchange/wmi v1.2.1
 	github.com/jpillora/s3 v1.1.4
 )
 
-require github.com/go-ole/go-ole v1.2.4 // indirect
+require (
+	github.com/go-ole/go-ole v1.3.0 // indirect
+	golang.org/x/sys v0.1.0 // indirect
+)
