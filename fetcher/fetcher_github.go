@@ -1,22 +1,20 @@
 package fetcher
 
 import (
-	"compress/gzip"
-	"encoding/json"
+	"context"
 	"errors"
 	"fmt"
 	"io"
-	"log"
 	"net/http"
 	"runtime"
 	"strings"
 	"time"
+
+	"github.com/google/go-github/v64/github"
 )
 
-// Github uses the Github V3 API to retrieve the latest release
-// of a given repository and enumerate its assets. If a release
-// contains a matching asset, it will fetch
-// and return its io.Reader stream.
+// Github uses the Github V3 API to retrieve the latest release of a given repository and enumerate its assets. If a release
+// contains a matching asset, it will fetch and return its io.Reader stream.
 type Github struct {
 	// Github username and repository name
 	User, Repo string
@@ -24,22 +22,17 @@ type Github struct {
 	Token string
 	// Interval between fetches
 	Interval time.Duration
-	// Asset is used to find matching release asset.
-	// By default a file will match if it contains
-	// both GOOS and GOARCH.
-	Asset func(filename string) bool
+	// Match is used to find matching release asset.
+	// By default a file will match if it contains both GOOS and GOARCH.
+	Match   func(filename string) bool
+	Context context.Context
 	// internal state
-	releaseURL    string
 	delay         bool
-	lastETag      string
 	latestRelease struct {
-		TagName string `json:"tag_name"`
-		Assets  []struct {
-			Name string `json:"name"`
-			URL  string `json:"browser_download_url"`
-		} `json:"assets"`
+		UpdatedAt time.Time
 	}
-	client *http.Client
+	githubClient *github.Client
+	httpClient   *http.Client
 }
 
 func (h *Github) defaultAsset(filename string) bool {
@@ -55,18 +48,20 @@ func (h *Github) Init() error {
 	if h.Repo == "" {
 		return errors.New("repo required")
 	}
-	if h.Asset == nil {
-		h.Asset = h.defaultAsset
+	if h.Match == nil {
+		h.Match = h.defaultAsset
 	}
-	h.releaseURL = "https://api.github.com/repos/" + h.User + "/" + h.Repo + "/releases/latest"
-	if h.Interval == 0 {
-		h.Interval = 5 * time.Minute
-	} else if h.Interval < 1*time.Minute {
-		log.Print("[overseer.github] warning: intervals less than 1 minute will surpass the public rate limit")
+
+	if h.Interval < time.Minute {
+		h.Interval = time.Minute
 	}
-	h.client = &http.Client{
-		Timeout: time.Second * 10,
+
+	if h.Context == nil {
+		h.Context = context.Background()
 	}
+
+	h.httpClient = &http.Client{Timeout: time.Minute}
+	h.githubClient = github.NewClient(h.httpClient).WithAuthToken(h.Token)
 	return nil
 }
 
@@ -77,100 +72,29 @@ func (h *Github) Fetch() (io.Reader, error) {
 		time.Sleep(h.Interval)
 	}
 	h.delay = true
-	// check release status
-	req, err := http.NewRequest("GET", h.releaseURL, nil)
+
+	release, resp, err := h.githubClient.Repositories.GetLatestRelease(h.Context, h.User, h.Repo)
 	if err != nil {
-		return nil, fmt.Errorf("failed to create release info request: %w", err)
-	}
-	// if token is provided, use it. Not required for assets or public repos
-	if h.Token != "" {
-		req.Header.Set("Authorization", "Bearer "+h.Token)
-	}
-	resp, err := h.client.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("failed to fetch latest release: %w", err)
-	}
-	if resp.StatusCode != http.StatusOK {
-		resp.Body.Close()
-		return nil, fmt.Errorf("unexpected status code from latest release request: %d", resp.StatusCode)
+		return nil, fmt.Errorf("failed to get last release: %w", err)
 	}
 
-	h.latestRelease.Assets = nil // clear assets
-	if err := json.NewDecoder(resp.Body).Decode(&h.latestRelease); err != nil {
-		return nil, fmt.Errorf("failed to decode latest release response: %w", err)
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("failed to get last release: %s", resp.Status)
 	}
-	resp.Body.Close()
-	// find matching asset
-	assetURL := ""
-	for _, a := range h.latestRelease.Assets {
-		if h.Asset(a.Name) {
-			assetURL = a.URL
-			break
+
+	for _, asset := range release.Assets {
+		if h.Match(asset.GetName()) {
+			if h.latestRelease.UpdatedAt == asset.UpdatedAt.Time {
+				return nil, errors.New("no new release")
+			}
+			body, _, err := h.githubClient.Repositories.DownloadReleaseAsset(h.Context, h.User, h.Repo, asset.GetID(), h.httpClient)
+			if err != nil {
+				return nil, fmt.Errorf("failed to download release asset: %w", err)
+			}
+			h.latestRelease.UpdatedAt = asset.UpdatedAt.Time
+			return body, nil
 		}
 	}
-	if assetURL == "" {
-		return nil, fmt.Errorf("no matching assets in latest release: %s", h.latestRelease.TagName)
-	}
 
-	// fetch location
-	req, err = http.NewRequest("HEAD", assetURL, nil)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create asset location request: %w", err)
-	}
-
-	resp, err = http.DefaultTransport.RoundTrip(req)
-	if err != nil {
-		return nil, fmt.Errorf("failed to request release location: %w", err)
-	}
-	resp.Body.Close()
-	if resp.StatusCode != http.StatusFound {
-		return nil, fmt.Errorf("unexpected status code for release location: %d", resp.StatusCode)
-	}
-
-	downloadURL := resp.Header.Get("Location")
-	if downloadURL == "" {
-		return nil, errors.New("no location for release asset found")
-	}
-
-	//pseudo-HEAD request
-	req, err = http.NewRequest("GET", downloadURL, nil)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create etag request: %w", err)
-	}
-	req.Header.Set("Range", "bytes=0-0") // HEAD not allowed so we request for 1 byte
-	resp, err = http.DefaultTransport.RoundTrip(req)
-	if err != nil {
-		return nil, fmt.Errorf("failed request first byte for etag: %w", err)
-	}
-	resp.Body.Close()
-	if resp.StatusCode != http.StatusPartialContent {
-		return nil, fmt.Errorf("unexpected status code for etag request: %d", resp.StatusCode)
-	}
-	etag := resp.Header.Get("ETag")
-	if etag != "" && h.lastETag == etag {
-		return nil, nil //skip, hash match
-	}
-
-	//get binary request
-	req, err = http.NewRequest("GET", downloadURL, nil)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create download request: %w", err)
-	}
-
-	resp, err = h.client.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("failed to fetch release: %w", err)
-	}
-	if resp.StatusCode != http.StatusOK {
-		resp.Body.Close()
-		return nil, fmt.Errorf("unexpected status code for download request: %d", resp.StatusCode)
-	}
-	h.lastETag = etag
-	//success!
-
-	//extract gz files
-	if strings.HasSuffix(assetURL, ".gz") && resp.Header.Get("Content-Encoding") != "gzip" {
-		return gzip.NewReader(resp.Body)
-	}
-	return resp.Body, nil
+	return nil, nil
 }
