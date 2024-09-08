@@ -1,6 +1,8 @@
 package fetcher
 
 import (
+	"archive/zip"
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -83,6 +85,9 @@ func (h *Github) Fetch() (io.Reader, error) {
 
 func (h *Github) fetchLatestRelease() (io.Reader, error) {
 	release, resp, err := h.githubClient.Repositories.GetLatestRelease(h.Context, h.User, h.Repo)
+	if resp.Body != nil {
+		defer resp.Body.Close()
+	}
 	if err != nil {
 		return nil, fmt.Errorf("failed to get last release: %w", err)
 	}
@@ -108,13 +113,16 @@ func (h *Github) fetchLatestRelease() (io.Reader, error) {
 }
 
 func (h *Github) fetchLatestArtifact() (io.Reader, error) {
-	runs, _, err := h.githubClient.Actions.ListRepositoryWorkflowRuns(h.Context, h.User, h.Repo, &github.ListWorkflowRunsOptions{
+	runs, resp, err := h.githubClient.Actions.ListRepositoryWorkflowRuns(h.Context, h.User, h.Repo, &github.ListWorkflowRunsOptions{
 		Branch: "main",
 		Status: "success",
 		ListOptions: github.ListOptions{
 			PerPage: 1,
 		},
 	})
+	if resp.Body != nil {
+		defer resp.Body.Close()
+	}
 	if err != nil {
 		return nil, fmt.Errorf("failed to get workflow runs: %w", err)
 	}
@@ -126,7 +134,10 @@ func (h *Github) fetchLatestArtifact() (io.Reader, error) {
 		return nil, errors.New("no new run")
 	}
 
-	artifacts, _, err := h.githubClient.Actions.ListWorkflowRunArtifacts(h.Context, h.User, h.Repo, runs.WorkflowRuns[0].GetID(), nil)
+	artifacts, resp, err := h.githubClient.Actions.ListWorkflowRunArtifacts(h.Context, h.User, h.Repo, runs.WorkflowRuns[0].GetID(), nil)
+	if resp.Body != nil {
+		defer resp.Body.Close()
+	}
 	if err != nil {
 		return nil, fmt.Errorf("failed to get workflow run artifacts: %w", err)
 	}
@@ -135,16 +146,43 @@ func (h *Github) fetchLatestArtifact() (io.Reader, error) {
 	}
 	for _, artifact := range artifacts.Artifacts {
 		if h.Match(artifact.GetName()) {
-			url, _, err := h.githubClient.Actions.DownloadArtifact(h.Context, h.User, h.Repo, artifact.GetID(), 10)
+			url, resp, err := h.githubClient.Actions.DownloadArtifact(h.Context, h.User, h.Repo, artifact.GetID(), 10)
 			if err != nil {
 				return nil, fmt.Errorf("failed to download artifact: %w", err)
 			}
-			resp, err := h.httpClient.Get(url.String())
-			if err != nil {
-				return nil, fmt.Errorf("failed to fetch artifact: %w", err)
+			if resp.Body != nil {
+				defer resp.Body.Close()
 			}
+
+			if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusFound {
+				return nil, fmt.Errorf("unexpected status code: %s", resp.Status)
+			}
+
+			req, err := http.NewRequest(http.MethodGet, url.String(), nil)
+			if err != nil {
+				return nil, fmt.Errorf("failed to create request: %w", err)
+			}
+			req.Header.Set("Accept", "application/vnd.github.v3+json")
+			req.Header.Set("User-Agent", "actuated-batch")
+
+			urlResp, err := h.httpClient.Do(req)
+			if err != nil {
+				return nil, fmt.Errorf("failed to download artifact: %w", err)
+			}
+
 			h.latestRun = runs.WorkflowRuns[0].GetID()
-			return resp.Body, nil
+			body, err := io.ReadAll(urlResp.Body)
+			if err != nil {
+				return nil, fmt.Errorf("failed to read artifact body: %w", err)
+			}
+			reader, err := zip.NewReader(bytes.NewReader(body), int64(len(body)))
+			if err != nil {
+				return nil, fmt.Errorf("failed to read zip archive: %w", err)
+			}
+			if len(reader.File) == 0 {
+				return nil, errors.New("no files in archive")
+			}
+			return reader.File[0].Open()
 		}
 	}
 	return nil, nil
