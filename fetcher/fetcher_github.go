@@ -26,13 +26,14 @@ type Github struct {
 	// By default a file will match if it contains both GOOS and GOARCH.
 	Match   func(filename string) bool
 	Context context.Context
+	// Fetch latest artifact instead of release
+	Artifact bool
 	// internal state
 	delay         bool
-	latestRelease struct {
-		UpdatedAt time.Time
-	}
-	githubClient *github.Client
-	httpClient   *http.Client
+	latestRelease time.Time
+	latestRun     int64
+	githubClient  *github.Client
+	httpClient    *http.Client
 }
 
 func (h *Github) defaultAsset(filename string) bool {
@@ -71,8 +72,16 @@ func (h *Github) Fetch() (io.Reader, error) {
 	if h.delay {
 		time.Sleep(h.Interval)
 	}
+
 	h.delay = true
 
+	if h.Artifact {
+		return h.fetchLatestArtifact()
+	}
+	return h.fetchLatestRelease()
+}
+
+func (h *Github) fetchLatestRelease() (io.Reader, error) {
 	release, resp, err := h.githubClient.Repositories.GetLatestRelease(h.Context, h.User, h.Repo)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get last release: %w", err)
@@ -84,17 +93,59 @@ func (h *Github) Fetch() (io.Reader, error) {
 
 	for _, asset := range release.Assets {
 		if h.Match(asset.GetName()) {
-			if h.latestRelease.UpdatedAt == asset.UpdatedAt.Time {
+			if h.latestRelease == asset.UpdatedAt.Time {
 				return nil, errors.New("no new release")
 			}
 			body, _, err := h.githubClient.Repositories.DownloadReleaseAsset(h.Context, h.User, h.Repo, asset.GetID(), h.httpClient)
 			if err != nil {
 				return nil, fmt.Errorf("failed to download release asset: %w", err)
 			}
-			h.latestRelease.UpdatedAt = asset.UpdatedAt.Time
+			h.latestRelease = asset.UpdatedAt.Time
 			return body, nil
 		}
 	}
+	return nil, nil
+}
 
+func (h *Github) fetchLatestArtifact() (io.Reader, error) {
+	runs, _, err := h.githubClient.Actions.ListRepositoryWorkflowRuns(h.Context, h.User, h.Repo, &github.ListWorkflowRunsOptions{
+		Branch: "main",
+		Status: "success",
+		ListOptions: github.ListOptions{
+			PerPage: 1,
+		},
+	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to get workflow runs: %w", err)
+	}
+	if len(runs.WorkflowRuns) == 0 {
+		return nil, errors.New("no successful workflow runs")
+	}
+
+	if h.latestRun == runs.WorkflowRuns[0].GetID() {
+		return nil, errors.New("no new run")
+	}
+
+	artifacts, _, err := h.githubClient.Actions.ListWorkflowRunArtifacts(h.Context, h.User, h.Repo, runs.WorkflowRuns[0].GetID(), nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get workflow run artifacts: %w", err)
+	}
+	if len(artifacts.Artifacts) == 0 {
+		return nil, errors.New("no artifacts found")
+	}
+	for _, artifact := range artifacts.Artifacts {
+		if h.Match(artifact.GetName()) {
+			url, _, err := h.githubClient.Actions.DownloadArtifact(h.Context, h.User, h.Repo, artifact.GetID(), 10)
+			if err != nil {
+				return nil, fmt.Errorf("failed to download artifact: %w", err)
+			}
+			resp, err := h.httpClient.Get(url.String())
+			if err != nil {
+				return nil, fmt.Errorf("failed to fetch artifact: %w", err)
+			}
+			h.latestRun = runs.WorkflowRuns[0].GetID()
+			return resp.Body, nil
+		}
+	}
 	return nil, nil
 }
