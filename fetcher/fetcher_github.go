@@ -120,7 +120,7 @@ func (h *Github) fetchLatestArtifact() (io.Reader, error) {
 			PerPage: 1,
 		},
 	})
-	if resp.Body != nil {
+	if resp != nil && resp.Body != nil {
 		defer resp.Body.Close()
 	}
 	if err != nil {
